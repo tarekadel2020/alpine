@@ -1,126 +1,126 @@
 #!/bin/bash
 # ============================================================
-# سكريبت التثبيت الكامل لنظام Alpine Linux
-# يستخدم 4 متغيرات فقط:
-#   DISK     : اسم القرص (مثال: /dev/sda)
-#   BOOT_PART: مسار قسم البوت (مثال: /dev/sda1)
-#   ROOT_PART: مسار قسم الروت (مثال: /dev/sda2)
-#   SWAP_PART: مسار قسم السواب (مثال: /dev/sda3)
+# Full Alpine Linux installation script
+# Uses only 4 variables:
+#   DISK     : target disk (e.g., /dev/sda)
+#   BOOT_PART: boot partition path (e.g., /dev/sda1)
+#   ROOT_PART: root partition path (e.g., /dev/sda2)
+#   SWAP_PART: swap partition path (e.g., /dev/sda3)
 # ============================================================
 
-# ----------------------- المتغيرات (قم بتعديلها) -----------------------
-DISK="/dev/sda"          # القرص المستهدف
-BOOT_PART="/dev/sda1"    # قسم البوت (يجب أن يكون من نوع FAT32 إذا كان UEFI)
-ROOT_PART="/dev/sda2"    # قسم النظام الجذر (ext4)
-SWAP_PART="/dev/sda3"    # قسم المبادلة (swap)
+# ----------------------- Variables (edit as needed) -----------------------
+DISK="/dev/sda"          # target disk
+BOOT_PART="/dev/sda1"    # boot partition (must be FAT32 if UEFI)
+ROOT_PART="/dev/sda2"    # root partition (ext4)
+SWAP_PART="/dev/sda3"    # swap partition
 
-# ----------------------- دالة للتحقق من البيئة -----------------------
+# ----------------------- Check environment -----------------------
 check_environment() {
     if [ "$EUID" -ne 0 ]; then
-        echo "الرجاء تشغيل السكريبت كـ 'root' (استخدم sudo أو su)"
+        echo "Please run this script as 'root' (use sudo or su)"
         exit 1
     fi
     apk update
     apk add e2fsprogs parted util-linux-misc
-    echo "البيئة جاهزة."
+    echo "Environment ready."
 }
 
-# ----------------------- دالة لتحضير الأقسام -----------------------
+# ----------------------- Prepare partitions -----------------------
 prepare_partitions() {
-    echo "=== تجهيز الأقسام ==="
-    # التحقق من وجود الأقسام المدخلة
+    echo "=== Preparing partitions ==="
+    # Verify existence of partitions
     if [ ! -b "$BOOT_PART" ]; then
-        echo "خطأ: قسم البوت $BOOT_PART غير موجود."
+        echo "ERROR: Boot partition $BOOT_PART does not exist."
         exit 1
     fi
     if [ ! -b "$ROOT_PART" ]; then
-        echo "خطأ: قسم الروت $ROOT_PART غير موجود."
+        echo "ERROR: Root partition $ROOT_PART does not exist."
         exit 1
     fi
     if [ ! -b "$SWAP_PART" ]; then
-        echo "خطأ: قسم السواب $SWAP_PART غير موجود."
+        echo "ERROR: Swap partition $SWAP_PART does not exist."
         exit 1
     fi
 
-    # تنسيق الأقسام (تحذير: ستمسح البيانات)
-    echo "سيتم تنسيق الأقسام التالية:"
-    echo "  $BOOT_PART -> FAT32 (إذا كان UEFI) أو ext4 (إذا كان BIOS)"
+    # Format partitions (warning: data will be erased)
+    echo "The following partitions will be formatted:"
+    echo "  $BOOT_PART -> FAT32 (if UEFI) or ext4 (if BIOS)"
     echo "  $ROOT_PART -> ext4"
     echo "  $SWAP_PART -> swap"
-    read -p "هل تريد المتابعة؟ (اكتب 'yes' للمتابعة): " confirm
+    read -p "Do you want to continue? (type 'yes' to proceed): " confirm
     if [ "$confirm" != "yes" ]; then
-        echo "تم الإلغاء."
+        echo "Aborted."
         exit 1
     fi
 
-    # تنسيق قسم البوت حسب نوع النظام
+    # Format boot partition according to system type
     if [ -d /sys/firmware/efi ]; then
         mkfs.vfat -F32 "$BOOT_PART"
     else
         mkfs.ext4 -F -O ^64bit "$BOOT_PART"
     fi
 
-    # تنسيق قسم الروت
+    # Format root partition
     mkfs.ext4 -F "$ROOT_PART"
 
-    # تنسيق قسم السواب
+    # Format swap partition
     mkswap "$SWAP_PART"
 
-    echo "تم تنسيق الأقسام بنجاح."
+    echo "Partitions formatted successfully."
 }
 
-# ----------------------- دالة لتركيب الأقسام -----------------------
+# ----------------------- Mount partitions -----------------------
 mount_partitions() {
-    echo "=== تركيب الأقسام ==="
+    echo "=== Mounting partitions ==="
     mount "$ROOT_PART" /mnt
     mkdir -p /mnt/boot
     mount "$BOOT_PART" /mnt/boot
     swapon "$SWAP_PART"
-    echo "تم التركيب."
+    echo "Mounting done."
 }
 
-# ----------------------- دالة لتثبيت النظام -----------------------
+# ----------------------- Install base system -----------------------
 install_system() {
-    echo "=== تثبيت النظام الأساسي ==="
+    echo "=== Installing base system ==="
     setup-disk -m sys /mnt
 }
 
-# ----------------------- دالة لتثبيت مُحمّل الإقلاع -----------------------
+# ----------------------- Install bootloader -----------------------
 install_bootloader() {
-    echo "=== تثبيت مُحمّل الإقلاع ==="
+    echo "=== Installing bootloader ==="
     if [ -d /sys/firmware/efi ]; then
-        echo "نظام UEFI مكتشف. جاري تثبيت GRUB..."
+        echo "UEFI system detected. Installing GRUB..."
         chroot /mnt apk add grub efibootmgr
         chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=Alpine
         chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
     else
-        echo "نظام BIOS مكتشف. جاري تثبيت Syslinux..."
+        echo "BIOS system detected. Installing Syslinux..."
         chroot /mnt apk add syslinux
         dd bs=440 count=1 conv=notrunc if=/usr/share/syslinux/mbr.bin of="$DISK"
         extlinux -i /mnt/boot
     fi
-    echo "تم تثبيت مُحمّل الإقلاع."
+    echo "Bootloader installed."
 }
 
-# ----------------------- دالة للتحقق من الإقلاع -----------------------
+# ----------------------- Verify boot -----------------------
 verify_boot() {
-    echo "=== التحقق من الإقلاع ==="
+    echo "=== Verifying boot ==="
     if [ -d /sys/firmware/efi ]; then
         if [ -f /mnt/boot/EFI/BOOT/BOOTX64.EFI ]; then
-            echo "✓ ملف الإقلاع موجود."
+            echo "✓ Boot file found."
         else
-            echo "⚠ لم يتم العثور على ملف الإقلاع، لكن قد يكون GRUB مثبتاً في مكان آخر."
+            echo "⚠ Boot file not found, but GRUB may be installed elsewhere."
         fi
     else
         if [ -f /mnt/boot/syslinux/syslinux.cfg ]; then
-            echo "✓ ملف syslinux.cfg موجود."
+            echo "✓ syslinux.cfg found."
         else
-            echo "⚠ لم يتم العثور على syslinux.cfg."
+            echo "⚠ syslinux.cfg not found."
         fi
     fi
 }
 
-# ----------------------- الدالة الرئيسية -----------------------
+# ----------------------- Main function -----------------------
 main() {
     check_environment
     prepare_partitions
@@ -130,9 +130,9 @@ main() {
     verify_boot
     echo ""
     echo "=================================================="
-    echo "اكتمل تثبيت Alpine Linux بنجاح."
-    echo "يمكنك الآن إعادة التشغيل باستخدام: reboot"
-    echo "لا تنسَ إزالة وسيط التثبيت."
+    echo "Alpine Linux installation completed successfully."
+    echo "You can now reboot using: reboot"
+    echo "Don't forget to remove the installation media."
     echo "=================================================="
 }
 
