@@ -1,18 +1,18 @@
 #!/bin/bash
 # ============================================================
-# Full Alpine Linux installation script
-# Uses only 4 variables:
-#   DISK     : target disk (e.g., /dev/sda)
-#   BOOT_PART: boot partition path (e.g., /dev/sda1)
-#   ROOT_PART: root partition path (e.g., /dev/sda2)
-#   SWAP_PART: swap partition path (e.g., /dev/sda3)
+# Full Alpine Linux installation script with automatic partitioning
+# Uses 4 variables:
+#   DISK      : target disk (e.g., /dev/sda)
+#   BOOT_SIZE : size of boot partition (e.g., 256M)
+#   SWAP_SIZE : size of swap partition (e.g., 2G)
+#   ROOT_SIZE : size of root partition (e.g., 30G) - remaining space goes to /home
 # ============================================================
 
 # ----------------------- Variables (edit as needed) -----------------------
-DISK="/dev/sda"          # target disk
-BOOT_PART="/dev/sda1"    # boot partition (must be FAT32 if UEFI)
-ROOT_PART="/dev/sda2"    # root partition (ext4)
-SWAP_PART="/dev/sda3"    # swap partition
+DISK="/dev/sda"          # target disk (WILL BE COMPLETELY WIPED)
+BOOT_SIZE="256M"         # boot partition size (FAT32 if UEFI)
+SWAP_SIZE="2G"           # swap partition size
+ROOT_SIZE="30G"          # root partition size (remaining space will be /home)
 
 # ----------------------- Check environment -----------------------
 check_environment() {
@@ -21,62 +21,81 @@ check_environment() {
         exit 1
     fi
     apk update
-    apk add e2fsprogs parted util-linux-misc
+    apk add e2fsprogs parted util-linux-misc gptfdisk
     echo "Environment ready."
 }
 
-# ----------------------- Prepare partitions -----------------------
-prepare_partitions() {
-    echo "=== Preparing partitions ==="
-    # Verify existence of partitions
-    if [ ! -b "$BOOT_PART" ]; then
-        echo "ERROR: Boot partition $BOOT_PART does not exist."
-        exit 1
-    fi
-    if [ ! -b "$ROOT_PART" ]; then
-        echo "ERROR: Root partition $ROOT_PART does not exist."
-        exit 1
-    fi
-    if [ ! -b "$SWAP_PART" ]; then
-        echo "ERROR: Swap partition $SWAP_PART does not exist."
-        exit 1
-    fi
-
-    # Format partitions (warning: data will be erased)
-    echo "The following partitions will be formatted:"
-    echo "  $BOOT_PART -> FAT32 (if UEFI) or ext4 (if BIOS)"
-    echo "  $ROOT_PART -> ext4"
-    echo "  $SWAP_PART -> swap"
-    read -p "Do you want to continue? (type 'yes' to proceed): " confirm
+# ----------------------- Automatic partitioning -----------------------
+auto_partition() {
+    echo "=== Partitioning $DISK automatically ==="
+    echo "WARNING: All data on $DISK will be erased!"
+    read -p "Type 'yes' to continue: " confirm
     if [ "$confirm" != "yes" ]; then
         echo "Aborted."
         exit 1
     fi
 
-    # Format boot partition according to system type
+    # Wipe disk and create new GPT label (works for both BIOS and UEFI)
+    wipefs -a "$DISK"
+    parted -s "$DISK" mklabel gpt
+
+    # Detect boot mode
     if [ -d /sys/firmware/efi ]; then
+        # UEFI: create ESP (boot partition)
+        parted -s "$DISK" mkpart primary fat32 1MiB "$BOOT_SIZE"
+        parted -s "$DISK" set 1 esp on
+        # Create root partition
+        parted -s "$DISK" mkpart primary ext4 "$BOOT_SIZE" "$ROOT_SIZE"
+        # Create swap partition
+        parted -s "$DISK" mkpart primary linux-swap "$ROOT_SIZE" "$SWAP_SIZE"
+        # Create home partition with remaining space
+        parted -s "$DISK" mkpart primary ext4 "$SWAP_SIZE" 100%
+        
+        # Set partition variables
+        BOOT_PART="${DISK}1"
+        ROOT_PART="${DISK}2"
+        SWAP_PART="${DISK}3"
+        HOME_PART="${DISK}4"
+        
+        # Format partitions
         mkfs.vfat -F32 "$BOOT_PART"
+        mkfs.ext4 -F "$ROOT_PART"
+        mkswap "$SWAP_PART"
+        mkfs.ext4 -F "$HOME_PART"
+        
+        # Mount
+        mount "$ROOT_PART" /mnt
+        mkdir -p /mnt/boot
+        mount "$BOOT_PART" /mnt/boot
+        mkdir -p /mnt/home
+        mount "$HOME_PART" /mnt/home
+        swapon "$SWAP_PART"
     else
-        mkfs.ext4 -F -O ^64bit "$BOOT_PART"
+        # BIOS: create single root partition (or separate boot if needed)
+        parted -s "$DISK" mkpart primary ext4 1MiB "$ROOT_SIZE"
+        parted -s "$DISK" set 1 boot on
+        # Create swap
+        parted -s "$DISK" mkpart primary linux-swap "$ROOT_SIZE" "$SWAP_SIZE"
+        # Create home with remaining space
+        parted -s "$DISK" mkpart primary ext4 "$SWAP_SIZE" 100%
+        
+        ROOT_PART="${DISK}1"
+        SWAP_PART="${DISK}2"
+        HOME_PART="${DISK}3"
+        
+        # Format
+        mkfs.ext4 -F -O ^64bit "$ROOT_PART"
+        mkswap "$SWAP_PART"
+        mkfs.ext4 -F "$HOME_PART"
+        
+        # Mount
+        mount "$ROOT_PART" /mnt
+        mkdir -p /mnt/home
+        mount "$HOME_PART" /mnt/home
+        swapon "$SWAP_PART"
+        # For BIOS, bootloader will be installed to /boot inside root partition
     fi
-
-    # Format root partition
-    mkfs.ext4 -F "$ROOT_PART"
-
-    # Format swap partition
-    mkswap "$SWAP_PART"
-
-    echo "Partitions formatted successfully."
-}
-
-# ----------------------- Mount partitions -----------------------
-mount_partitions() {
-    echo "=== Mounting partitions ==="
-    mount "$ROOT_PART" /mnt
-    mkdir -p /mnt/boot
-    mount "$BOOT_PART" /mnt/boot
-    swapon "$SWAP_PART"
-    echo "Mounting done."
+    echo "Partitioning and formatting completed."
 }
 
 # ----------------------- Install base system -----------------------
@@ -97,7 +116,16 @@ install_bootloader() {
         echo "BIOS system detected. Installing Syslinux..."
         chroot /mnt apk add syslinux
         dd bs=440 count=1 conv=notrunc if=/usr/share/syslinux/mbr.bin of="$DISK"
-        extlinux -i /mnt/boot
+        # For BIOS, /boot is inside root partition, so we need to install extlinux there
+        mkdir -p /mnt/boot/syslinux
+        extlinux -i /mnt/boot/syslinux
+        # Create syslinux.cfg
+        cat > /mnt/boot/syslinux/syslinux.cfg << EOF
+DEFAULT linux
+LABEL linux
+    KERNEL /boot/vmlinuz-lts
+    APPEND root=${ROOT_PART} ro quiet
+EOF
     fi
     echo "Bootloader installed."
 }
@@ -123,8 +151,7 @@ verify_boot() {
 # ----------------------- Main function -----------------------
 main() {
     check_environment
-    prepare_partitions
-    mount_partitions
+    auto_partition
     install_system
     install_bootloader
     verify_boot
