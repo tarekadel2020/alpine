@@ -2,62 +2,47 @@
 set -e
 
 # =================================================================
-# 1. إعداد المتغيرات (قم بتغييرها حسب رغبتك)
+# 1. إدخال مسارات الأقسام الجاهزة (تأكد من كتابتها بدقة)
 # =================================================================
-# مسار القرص الأساسي
-DISK="/dev/sda"
+# قسم الإقلاع (EFI) الموجود مسبقاً
+PART_EFI="/dev/sda1"
 
-# مسارات الأقسام المخصصة
-PART_EFI="${DISK}1"
-PART_SWAP="${DISK}2"
-PART_ROOT="${DISK}3"
+# قسم النظام (Root) الذي تريد التثبيت عليه
+PART_ROOT="/dev/sda3"
 
-# حجم الأقسام
-SIZE_EFI="512MiB"
-SIZE_SWAP="4GiB"
+# قسم الذاكرة الافتراضية (Swap) إن وجد (اتركه فارغاً "" إذا لم ترغب به)
+PART_SWAP="/dev/sda2"
 
 # إعدادات النظام الأساسية
 HOSTNAME="alpine-desktop"
 TIMEZONE="Asia/Riyadh"
 KEYMAP="us us"
 
-echo "=== [1/6] تثبيت الأدوات اللازمة للتقسيم ==="
-apk add parted e2fsprogs dosfstools --no-cache
+echo "=== [1/5] تثبيت الأدوات اللازمة ==="
+apk add e2fsprogs dosfstools --no-cache
 
-echo "=== [2/6] مسح القرص وإنشاء جدول التقسيم الجديد ==="
-# مسح جدول التقسيم القديم وصنع جدول GPT جديد
-parted -s "$DISK" mklabel gpt
-
-# إنشاء قسم الـ EFI
-parted -s "$DISK" mkpart primary fat32 1MiB "$SIZE_EFI"
-parted -s "$DISK" set 1 esp on
-
-# إنشاء قسم الـ Swap
-parted -s "$DISK" mkpart primary linux-swap "$SIZE_EFI" "$SIZE_SWAP"
-
-# إنشاء قسم الـ Root (باقي مساحة الهارد)
-parted -s "$DISK" mkpart primary ext4 "$SIZE_SWAP" 100%
-
-echo "=== [3/6] عمل فورمات للأقسام وتفعيلها ==="
-# فورمات قسم الـ EFI
+echo "=== [2/5] عمل فورمات للأقسام المحددة فقط ==="
+# تهيئة قسم الـ EFI (تنبيه: إذا كان لديك نظام آخر مثل Windows، احذف هذا السطر لتجنب مسح ملفات إقلاعه)
 mkfs.vfat -F32 "$PART_EFI"
 
-# إعداد وتفعيل قسم الـ Swap
-mkswap "$PART_SWAP"
-swapon "$PART_SWAP"
+# تهيئة وتفعيل الـ Swap إذا تم تحديده
+if [ -n "$PART_SWAP" ]; then
+    mkswap "$PART_SWAP"
+    swapon "$PART_SWAP"
+fi
 
-# فورمات قسم الـ Root
+# تهيئة قسم الـ Root الأساسي (سيمسح أي بيانات قديمة عليه فقط)
 mkfs.ext4 -F "$PART_ROOT"
 
-echo "=== [4/6] تركيب الأقسام داخل المجلد /mnt ==="
-# تركيب القرص الرئيسي
+echo "=== [3/5] تركيب الأقسام داخل المجلد /mnt ==="
+# تركيب قسم الـ Root
 mount -t ext4 "$PART_ROOT" /mnt
 
-# تركيب قسم الـ EFI
+# إنشاء مجلد الـ EFI وتركيبه
 mkdir -p /mnt/boot/efi
 mount -t vfat "$PART_EFI" /mnt/boot/efi
 
-echo "=== [5/6] إنشاء ملف الإجابات لتثبيت النظام تلقائياً ==="
+echo "=== [4/5] إنشاء ملف الإجابات للإعدادات التلقائية ==="
 cat << EOF > /tmp/answers
 KEYMAPOPTS="$KEYMAP"
 HOSTNAMEOPTS="-n $HOSTNAME"
@@ -68,14 +53,14 @@ SSHDOPTS="-c openssh"
 NTPOPTS="-c chrony"
 EOF
 
-# تشغيل إعدادات Alpine المبدئية بناءً على ملف الإجابات
+# تطبيق الإعدادات المبدئية
 setup-alpine -f /tmp/answers
 
-echo "=== [6/6] تثبيت Alpine Linux على الهارد المخصص ==="
-# تثبيت النظام والـ Bootloader داخل المسار /mnt
+echo "=== [5/5] تثبيت Alpine Linux على الأقسام المحددة ==="
+# تثبيت النظام والـ Bootloader مباشرة على الأقسام المركبة في /mnt
 setup-disk -m sys /mnt
 
 echo "====================================================="
-echo "✅ تم تثبيت Alpine Linux بنجاح على التقسيم المخصص!"
-echo "يمكنك الآن كتابة 'reboot' لإعادة تشغيل الجهاز."
+echo "✅ تم تثبيت Alpine Linux بنجاح على الأقسام المحددة!"
+echo "يمكنك الآن كتابة 'reboot' لإعادة التشغيل."
 echo "====================================================="
