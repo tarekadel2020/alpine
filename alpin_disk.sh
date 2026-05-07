@@ -1,14 +1,15 @@
 #!/bin/sh
-# Auto Alpine Installer - Semi-interactive
-# This script must be run from Alpine Linux live environment as root.
+# سكريبت التثبيت التلقائي لنظام Alpine Linux
+# يجب تشغيله من بيئة Alpine الحية (Live CD/USB) بصلاحيات الجذر
 
-# ========== Static settings (modify as needed) ==========
-KEYMAP="us"
-TIMEZONE="Asia/Riyadh"
-APK_REPO="-1"
-HOSTNAME="alpine-box"
-SSHD_ENABLE="openssh"
-NTP_SERVICE="openntpd"
+# ========== إعدادات ثابتة (يمكن تعديلها حسب الرغبة) ==========
+KEYMAP="us"                 # تخطيط لوحة المفاتيح (مثال: us, de, fr)
+TIMEZONE="Asia/Riyadh"      # المنطقة الزمنية (مثال: Asia/Riyadh, Europe/London)
+APK_REPO="-1"               # -1 لأقرب مرآة، أو رابط محدد مثل http://dl-cdn.alpinelinux.org/alpine/v3.20/main
+HOSTNAME="alpine-box"       # اسم المضيف
+SSHD_ENABLE="openssh"       # تمكين SSH: openssh أو none
+NTP_SERVICE="openntpd"      # خدمة الوقت: openntpd, chrony, none
+# تكوين واجهة الشبكة (eth0 مع DHCP)
 INTERFACES_CONFIG="auto lo
 iface lo inet loopback
 
@@ -16,13 +17,15 @@ auto eth0
 iface eth0 inet dhcp
     hostname $HOSTNAME
 "
-# ====================================================
+# =============================================================
 
+# ألوان للإخراج (اختياري لجعل الرسائل واضحة)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# دوال مساعدة لعرض الرسائل
 error() {
     echo -e "${RED}ERROR: $1${NC}" >&2
     exit 1
@@ -36,16 +39,16 @@ ask() {
     echo -e "${YELLOW}$1${NC}"
 }
 
-# Check root
+# التحقق من صلاحيات الجذر
 [ "$(id -u)" -ne 0 ] && error "Please run as root (use sudo or su)."
 
-# Warn about disk erase
+# تحذير قبل البدء
 echo "WARNING: This script will erase the entire disk and install a new system."
 ask "Are you sure you want to continue? [y/N]"
 read confirm
 [ "$confirm" != "y" ] && error "Aborted."
 
-# Select disk
+# عرض الأقراص المتاحة واختيار القرص المستهدف
 info "Available disks:"
 lsblk -d -o NAME,SIZE,MODEL | grep -v "^loop"
 ask "Enter the disk name to install on (e.g., sda or vda):"
@@ -54,7 +57,7 @@ read DISK
 DISK="/dev/$DISK"
 [ ! -b "$DISK" ] && error "Disk $DISK does not exist."
 
-# Boot mode
+# تحديد نمط التمهيد (BIOS أو UEFI)
 ask "Does your system use UEFI? [y/N]"
 read uefi
 if [ "$uefi" = "y" ] || [ "$uefi" = "Y" ]; then
@@ -63,31 +66,35 @@ else
     BOOT_MODE="bios"
 fi
 
-# Partitioning
+# ========== تقسيم القرص ==========
 info "Now we will partition $DISK."
-ask "Do you want automatic partitioning (single root + swap) or manual? [auto/manual]"
+ask "Do you want automatic partitioning (single root + swap) or manual using cfdisk? [auto/manual]"
 read partition_choice
 
 if [ "$partition_choice" = "manual" ]; then
-    info "Running fdisk. Create partitions as needed (root, swap, optionally others)."
-    ask "Press Enter to start fdisk..."
+    # التقسيم اليدوي باستخدام cfdisk
+    info "Running cfdisk. Create partitions as you wish (root, swap, optionally others)."
+    ask "Press Enter to start cfdisk and partition $DISK manually..."
     read dummy
-    fdisk $DISK
+    cfdisk $DISK
     info "Manual partitioning done. Make sure root partition exists and is formatted ext4."
     ask "Continue with installation? [y/N]"
     read continue_install
     [ "$continue_install" != "y" ] && error "Aborted."
+    # بعد التقسيم اليدوي، نطلب من المستخدم تحديد الأقسام
     info "Enter root partition (e.g., ${DISK}1 or ${DISK}2):"
     read ROOT_PART
     [ -z "$ROOT_PART" ] && error "Root partition not entered."
-    info "Enter swap partition (if any, leave empty):"
+    info "Enter swap partition (if any, leave empty if none):"
     read SWAP_PART
+    # تنسيق القسم الجذر وتركيبه
     mkfs.ext4 -F $ROOT_PART
     mount $ROOT_PART /mnt
     if [ -n "$SWAP_PART" ]; then
         mkswap $SWAP_PART
         swapon $SWAP_PART
     fi
+    # معالجة UEFI: طلب قسم EFI
     if [ "$BOOT_MODE" = "uefi" ]; then
         info "You must have an EFI partition (vfat). Enter its name (e.g., ${DISK}1):"
         read EFI_PART
@@ -96,7 +103,9 @@ if [ "$partition_choice" = "manual" ]; then
         mount $EFI_PART /mnt/boot
     fi
 else
+    # التقسيم التلقائي (بسيط)
     info "Automatic partitioning: creating single root + swap (and EFI if needed)."
+    # مسح جدول الأقسام الحالي بالكامل
     dd if=/dev/zero of=$DISK bs=1M count=1 2>/dev/null
     if [ "$BOOT_MODE" = "uefi" ]; then
         parted -s $DISK mklabel gpt
@@ -128,7 +137,8 @@ else
     fi
 fi
 
-# Create answer file for setup-alpine
+# ========== إعداد ملف الإجابة لـ setup-alpine ==========
+# يحتوي على الإعدادات الثابتة (لوحة المفاتيح، الوقت، المرآة...)
 cat > /tmp/answer_file <<EOF
 KEYMAPOPTS="$KEYMAP"
 HOSTNAMEOPTS="$HOSTNAME"
@@ -139,7 +149,7 @@ PROXYOPTS="none"
 APKREPOSOPTS="$APK_REPO"
 EOF
 
-# Ask for passwords and user info
+# ========== طلب معلومات المستخدم (كلمات المرور واسم المستخدم) ==========
 ask "Enter root password:"
 read -s ROOT_PASSWORD
 [ -z "$ROOT_PASSWORD" ] && error "Root password required."
@@ -160,13 +170,14 @@ if [ "$create_user" = "y" ]; then
     fi
 fi
 
-# Run setup-disk
+# ========== تثبيت النظام الأساسي باستخدام setup-disk ==========
 info "Running setup-disk..."
 setup-disk -m sys /mnt || error "setup-disk failed"
 
+# نسخ ملف الإجابة إلى النظام الجديد
 cp /tmp/answer_file /mnt/tmp/
 
-# Chroot configuration
+# ========== تهيئة النظام داخل chroot (ضبط كلمات المرور والخدمات) ==========
 info "Configuring system inside chroot..."
 mount --bind /dev /mnt/dev
 mount --bind /proc /mnt/proc
@@ -195,20 +206,23 @@ chroot /mnt /bin/sh <<EOF
         rc-update add chronyd default
     fi
 
+    # إضافة قسم swap إلى fstab إذا كان موجوداً
     if [ -n "$SWAP_PART" ]; then
         echo "$SWAP_PART swap swap defaults 0 0" >> /etc/fstab
     fi
 
+    # إضافة قسم EFI إلى fstab (لتثبيته تلقائياً بعد التشغيل)
     if [ "$BOOT_MODE" = "uefi" ] && [ -n "$EFI_PART" ]; then
         echo "$EFI_PART /boot vfat defaults 0 2" >> /etc/fstab
     fi
 EOF
 
-# Cleanup
+# ========== تنظيف وإلغاء التركيب ==========
 umount /mnt/dev /mnt/proc /mnt/sys
 umount /mnt/boot 2>/dev/null
 umount /mnt
 
+# ========== اكتمال التثبيت ==========
 info "Installation completed successfully."
 info "You may now reboot into your new Alpine system."
 info "Root password: $ROOT_PASSWORD"
