@@ -2,102 +2,100 @@
 set -e
 
 # =================================================================
-# 1. CONFIGURATION (Adjust paths to match your partitions)
+# 1. إعدادات الأقسام (تأكد من مطابقة المسارات لجهازك)
 # =================================================================
 DISK="/dev/sda"
-PART_EFI="/dev/sda1"  # Used for UEFI mode only
-PART_SWAP="/dev/sda2" # Leave as "" if not using swap
+PART_BOOT="/dev/sda1"  # المساحة الموصى بها: 512MB
 PART_ROOT="/dev/sda3"
+PART_SWAP="/dev/sda2"
 
-echo "🔎 Checking System Environment and Disk Type..."
+echo "🔎 Starting Intelligent System Discovery..."
 
-# Detect Boot Mode (UEFI vs BIOS)
+# --- التحقق من وضع الإقلاع ---
 if [ -d "/sys/firmware/efi" ]; then
     BOOT_MODE="UEFI"
+    FS_TYPE="vfat"
+    echo "✅ [Detected]: UEFI Mode. (Using FAT32 for Boot Partition)"
 else
     BOOT_MODE="BIOS"
+    FS_TYPE="ext4"
+    echo "✅ [Detected]: BIOS/Legacy Mode. (Using EXT4 for Boot Partition)"
 fi
 
-# Detect Partition Table Type (GPT vs MBR)
+# --- التحقق من نوع الهارد ---
+apk add parted --no-cache > /dev/null
 PART_TYPE=$(parted -s "$DISK" print | grep "Partition Table" | cut -d: -f2 | xargs)
+echo "✅ [Disk Type]: $PART_TYPE"
 
-echo "✅ Boot Mode Detected: $BOOT_MODE"
-echo "✅ Partition Table Detected: $PART_TYPE"
-
-# =================================================================
-# 2. GPT + BIOS CASE CHECK
-# =================================================================
+# --- التحقق من حالة BIOS + GPT الحرجة ---
 if [ "$BOOT_MODE" = "BIOS" ] && [ "$PART_TYPE" = "gpt" ]; then
+    echo "⚠️  [Warning]: BIOS on GPT disk detected."
+    # البحث عن قسم bios_grub
     if ! parted -s "$DISK" print | grep -q "bios_grub"; then
-        echo "❌ ERROR: GPT on BIOS requires a 1MB partition with 'bios_grub' flag."
-        echo "Please create a 1MB partition and set: parted $DISK set <num> bios_grub on"
+        echo "❌ [Error]: You need a 1MB partition with 'bios_grub' flag for this to work!"
+        echo "Please run: parted $DISK set <part_number> bios_grub on"
         exit 1
     fi
+    echo "✅ [Status]: bios_grub partition found."
 fi
 
 # =================================================================
-# 3. PREPARATION AND MOUNTING
+# 2. تهيئة وتركيب الأقسام
 # =================================================================
-echo "🛠️ Preparing and Mounting Partitions..."
-apk add e2fsprogs dosfstools parted --no-cache
+echo "🛠️ Formatting and Mounting..."
+apk add e2fsprogs dosfstools --no-cache
 
 mkfs.ext4 -F "$PART_ROOT"
-mount "$PART_ROOT" /mnt
 
 if [ "$BOOT_MODE" = "UEFI" ]; then
-    mkfs.vfat -F32 "$PART_EFI"
-    mkdir -p /mnt/boot/efi
-    mount "$PART_EFI" /mnt/boot/efi
+    mkfs.vfat -F32 "$PART_BOOT"
+else
+    mkfs.ext4 -F "$PART_BOOT"
 fi
 
-# =================================================================
-# 4. BASE SYSTEM INSTALLATION
-# =================================================================
-echo "📦 Installing Alpine Base System..."
-setup-apkrepos -1
-export BOOTLOADER=none  # Disable default extlinux to avoid boot errors
-setup-disk -m sys /mnt
+mount "$PART_ROOT" /mnt
+mkdir -p /mnt/boot
+mount "$PART_BOOT" /mnt/boot
+
+[ -n "$PART_SWAP" ] && mkswap "$PART_SWAP" && swapon "$PART_SWAP"
 
 # =================================================================
-# 5. FIXING CANONICAL PATH & TMPFS (BIND MOUNTING)
+# 3. التثبيت الأساسي وحل مشكلة الـ Canonical Path
 # =================================================================
-echo "🔗 Binding System Directories (Fixing Canonical Path)..."
+setup-apkrepos -1
+export BOOTLOADER=none
+setup-disk -m sys /mnt
+
+echo "🔗 Binding system directories for Chroot..."
 for dir in /dev /proc /sys /run; do
     mkdir -p /mnt$dir
     mount --bind $dir /mnt$dir
 done
 
 # =================================================================
-# 6. INTERNAL GRUB INSTALLATION (CHROOT)
+# 4. تثبيت محمل الإقلاع المناسب من الداخل
 # =================================================================
-echo "🏗️ Installing Bootloader inside Chroot..."
-
-cat << CHROOT_SCRIPT > /mnt/final_install.sh
+cat << CHROOT_SCRIPT > /mnt/setup_boot.sh
 #!/bin/sh
-# Install required packages inside the new system
-if [ -d "/sys/firmware/efi" ]; then
+if [ "$BOOT_MODE" = "UEFI" ]; then
     apk add grub-efi efibootmgr --no-cache
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ALPINE --recheck
+    grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ALPINE
 else
     apk add grub-bios --no-cache
-    grub-install --target=i386-pc "$DISK" --recheck
+    grub-install --target=i386-pc "$DISK"
 fi
 grub-mkconfig -o /boot/grub/grub.cfg
 CHROOT_SCRIPT
 
-chmod +x /mnt/final_install.sh
-chroot /mnt /bin/sh /final_install.sh
-rm /mnt/final_install.sh
+chmod +x /mnt/setup_boot.sh
+chroot /mnt /bin/sh /setup_boot.sh
+rm /mnt/setup_boot.sh
 
 # =================================================================
-# 7. CLEANUP
+# 5. إنهاء المهمة
 # =================================================================
-echo "🧹 Cleaning up mount points..."
 umount /mnt/dev /mnt/proc /mnt/sys /mnt/run || true
-[ "$BOOT_MODE" = "UEFI" ] && umount /mnt/boot/efi || true
-
 echo "====================================================="
-echo "✅ Installation successfully finished!"
-echo "System: $BOOT_MODE | Disk: $PART_TYPE"
-echo "You can now type: reboot"
+echo "🎊 Done! System configured for $BOOT_MODE on $PART_TYPE."
+echo "You can now safely reboot."
 echo "====================================================="
