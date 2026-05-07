@@ -47,7 +47,11 @@ command -v parted >/dev/null 2>&1 || { info "Installing parted..."; apk add part
 command -v sfdisk >/dev/null 2>&1 || { info "Installing sfdisk..."; apk add util-linux || error "Failed to install util-linux"; }
 
 # إذا لم يكن النظام حياً، لا نستمر
-[ -z "$(mount | grep 'on / ')" ] || error "This script must be run from Alpine live environment (not from installed system)."
+#[ -z "$(mount | grep 'on / ')" ] || error "This script must be run from Alpine live environment (not from installed system)."
+echo "WARNING: This script must be run from Alpine live environment."
+echo "If you are not currently booted from Alpine live CD/USB, this will destroy your system."
+read -p "Continue? [y/N]: " ans
+[ "$ans" = "y" -o "$ans" = "Y" ] || exit 1
 
 # تأكيد الكتابة على القرص (سؤال واحد فقط)
 printf "\nWARNING: This will erase ALL data on $DISK. Continue? [y/N]: "
