@@ -3,12 +3,13 @@
 # يجب تشغيله من بيئة Alpine الحية (Live CD/USB) بصلاحيات الجذر
 
 # ========== إعدادات ثابتة (يمكن تعديلها حسب الرغبة) ==========
-KEYMAP="us"
-TIMEZONE="Asia/Riyadh"
-APK_REPO="-1"
-HOSTNAME="alpine-box"
-SSHD_ENABLE="openssh"
-NTP_SERVICE="openntpd"
+KEYMAP="us"                 # تخطيط لوحة المفاتيح (مثال: us, de, fr)
+TIMEZONE="Asia/Riyadh"      # المنطقة الزمنية (مثال: Asia/Riyadh, Europe/London)
+APK_REPO="-1"               # -1 لأقرب مرآة، أو رابط محدد
+HOSTNAME="alpine-box"       # اسم المضيف
+SSHD_ENABLE="openssh"       # تمكين SSH: openssh أو none
+NTP_SERVICE="openntpd"      # خدمة الوقت: openntpd, chrony, none
+# تكوين واجهة الشبكة (eth0 مع DHCP)
 INTERFACES_CONFIG="auto lo
 iface lo inet loopback
 
@@ -18,22 +19,36 @@ iface eth0 inet dhcp
 "
 # =============================================================
 
+# ألوان للإخراج (اختياري لجعل الرسائل واضحة)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-error() { echo -e "${RED}ERROR: $1${NC}" >&2; exit 1; }
-info() { echo -e "${GREEN}INFO: $1${NC}"; }
-ask() { echo -e "${YELLOW}$1${NC}"; }
+# دوال مساعدة لعرض الرسائل
+error() {
+    echo -e "${RED}ERROR: $1${NC}" >&2
+    exit 1
+}
 
-[ "$(id -u)" -ne 0 ] && error "Please run as root."
+info() {
+    echo -e "${GREEN}INFO: $1${NC}"
+}
 
+ask() {
+    echo -e "${YELLOW}$1${NC}"
+}
+
+# التحقق من صلاحيات الجذر
+[ "$(id -u)" -ne 0 ] && error "Please run as root (use sudo or su)."
+
+# تحذير قبل البدء
 echo "WARNING: This script will erase the entire disk and install a new system."
 ask "Are you sure you want to continue? [y/N]"
 read confirm
 [ "$confirm" != "y" ] && error "Aborted."
 
+# عرض الأقراص المتاحة واختيار القرص المستهدف
 info "Available disks:"
 lsblk -d -o NAME,SIZE,MODEL | grep -v "^loop"
 ask "Enter the disk name to install on (e.g., sda or vda):"
@@ -42,6 +57,7 @@ read DISK
 DISK="/dev/$DISK"
 [ ! -b "$DISK" ] && error "Disk $DISK does not exist."
 
+# تحديد نمط التمهيد (BIOS أو UEFI)
 ask "Does your system use UEFI? [y/N]"
 read uefi
 if [ "$uefi" = "y" ] || [ "$uefi" = "Y" ]; then
@@ -50,72 +66,104 @@ else
     BOOT_MODE="bios"
 fi
 
-# تثبيت الأدوات المطلوبة
-info "Installing required tools (e2fsprogs, dosfstools, cfdisk, parted)..."
+# ========== تثبيت الأدوات المطلوبة للتقسيم ==========
+info "Installing required tools (e2fsprogs, dosfstools, cfdisk, parted, util-linux)..."
 apk update
-apk add e2fsprogs dosfstools cfdisk parted || error "Failed to install tools"
+apk add e2fsprogs dosfstools cfdisk parted util-linux
+if [ $? -ne 0 ]; then
+    error "Failed to install required tools. Please check your internet connection."
+fi
+info "Required tools installed successfully."
 
+# ========== تقسيم القرص ==========
 info "Now we will partition $DISK."
 ask "Do you want automatic partitioning (single root + swap) or manual using cfdisk? [auto/manual]"
 read partition_choice
 
 if [ "$partition_choice" = "manual" ]; then
+    # التقسيم اليدوي باستخدام cfdisk
     info "Running cfdisk. Create partitions as you wish (root, swap, optionally others)."
-    ask "Press Enter to start cfdisk..."
+    ask "Press Enter to start cfdisk and partition $DISK manually..."
     read dummy
     cfdisk $DISK
-    info "Enter root partition (e.g., ${DISK}1):"
+    info "Manual partitioning done. Make sure root partition exists and is formatted ext4."
+    ask "Continue with installation? [y/N]"
+    read continue_install
+    [ "$continue_install" != "y" ] && error "Aborted."
+    # بعد التقسيم اليدوي، نطلب من المستخدم تحديد الأقسام
+    info "Enter root partition (e.g., ${DISK}1 or ${DISK}2):"
     read ROOT_PART
     [ -z "$ROOT_PART" ] && error "Root partition not entered."
-    info "Enter swap partition (leave empty if none):"
+    info "Enter swap partition (if any, leave empty if none):"
     read SWAP_PART
-    info "Enter EFI partition (for UEFI only, leave empty if not needed):"
-    read EFI_PART
-
-    mkfs.ext4 -F $ROOT_PART || error "Failed to format root partition"
-    mount $ROOT_PART /mnt || error "Failed to mount root partition"
+    # تنسيق القسم الجذر وتركيبه
+    mkfs.ext4 -F $ROOT_PART
+    mount $ROOT_PART /mnt
     mountpoint -q /mnt || error "/mnt is not a mount point"
-
     if [ -n "$SWAP_PART" ]; then
         mkswap $SWAP_PART
         swapon $SWAP_PART
     fi
-    # لا نركب EFI هنا، سنركبه داخل chroot بعد setup-disk
+    # معالجة UEFI: طلب قسم EFI
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        info "You must have an EFI partition (vfat). Enter its name (e.g., ${DISK}1):"
+        read EFI_PART
+        mkfs.vfat -F32 $EFI_PART
+        # لا نركب EFI هنا، سيتم داخل chroot
+    fi
 else
+    # التقسيم التلقائي باستخدام sfdisk (أكثر موثوقية من parted)
     info "Automatic partitioning: creating single root + swap (and EFI if needed)."
+    # مسح أول 1 ميجابايت من القرص
     dd if=/dev/zero of=$DISK bs=1M count=1 2>/dev/null
     if [ "$BOOT_MODE" = "uefi" ]; then
-        parted -s $DISK mklabel gpt
-        parted -s $DISK mkpart primary fat32 1MiB 513MiB
-        parted -s $DISK set 1 esp on
+        sfdisk $DISK <<EOF
+label: gpt
+device: $DISK
+${DISK}1 : start=1MiB size=512MiB type=EF
+${DISK}2 : start=513MiB size=2048MiB type=82
+${DISK}3 : start=2561MiB type=83
+EOF
         EFI_PART="${DISK}1"
-        parted -s $DISK mkpart primary linux-swap 513MiB 2561MiB
         SWAP_PART="${DISK}2"
-        parted -s $DISK mkpart primary ext4 2561MiB 100%
         ROOT_PART="${DISK}3"
-        mkfs.vfat -F32 $EFI_PART
-        mkswap $SWAP_PART
-        swapon $SWAP_PART
-        mkfs.ext4 -F $ROOT_PART
-        mount $ROOT_PART /mnt || error "Failed to mount root partition"
-        mountpoint -q /mnt || error "/mnt is not a mount point"
-        # لا نركب efi هنا
     else
-        parted -s $DISK mklabel msdos
-        parted -s $DISK mkpart primary ext4 1MiB 2049MiB
+        sfdisk $DISK <<EOF
+label: dos
+device: $DISK
+${DISK}1 : start=1MiB size=2048MiB type=83 bootable
+${DISK}2 : start=2049MiB size=2048MiB type=82
+EOF
         ROOT_PART="${DISK}1"
-        parted -s $DISK mkpart primary linux-swap 2049MiB 4098MiB
         SWAP_PART="${DISK}2"
-        parted -s $DISK set 1 boot on
-        mkfs.ext4 -F $ROOT_PART
-        mkswap $SWAP_PART
-        swapon $SWAP_PART
-        mount $ROOT_PART /mnt || error "Failed to mount root partition"
-        mountpoint -q /mnt || error "/mnt is not a mount point"
     fi
+    # تحديث جدول الأقسام في النواة
+    partprobe $DISK 2>/dev/null || blockdev --rereadpt $DISK
+    sleep 2  # انتظار حتى يتعرف النظام على الأقسام
+    # التحقق من وجود الأقسام
+    if [ ! -b "$ROOT_PART" ]; then
+        error "Root partition $ROOT_PART does not exist. Partitioning failed."
+    fi
+    if [ -n "$SWAP_PART" ] && [ ! -b "$SWAP_PART" ]; then
+        error "Swap partition $SWAP_PART does not exist. Partitioning failed."
+    fi
+    if [ "$BOOT_MODE" = "uefi" ] && [ ! -b "$EFI_PART" ]; then
+        error "EFI partition $EFI_PART does not exist. Partitioning failed."
+    fi
+    # تنسيق الأقسام
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        mkfs.vfat -F32 $EFI_PART
+    fi
+    mkswap $SWAP_PART
+    swapon $SWAP_PART
+    mkfs.ext4 -F $ROOT_PART
+    # تركيب القسم الجذر
+    mount $ROOT_PART /mnt || error "Failed to mount root partition"
+    mountpoint -q /mnt || error "/mnt is not a mount point"
+    # EFI سيتم تركيبه لاحقاً داخل chroot
 fi
 
-# إنشاء ملف الإجابة
+# ========== إعداد ملف الإجابة لـ setup-alpine ==========
 cat > /tmp/answer_file <<EOF
 KEYMAPOPTS="$KEYMAP"
 HOSTNAMEOPTS="$HOSTNAME"
@@ -126,7 +174,7 @@ PROXYOPTS="none"
 APKREPOSOPTS="$APK_REPO"
 EOF
 
-# طلب كلمات المرور
+# ========== طلب معلومات المستخدم (كلمات المرور واسم المستخدم) ==========
 ask "Enter root password:"
 read -s ROOT_PASSWORD
 [ -z "$ROOT_PASSWORD" ] && error "Root password required."
@@ -147,20 +195,24 @@ if [ "$create_user" = "y" ]; then
     fi
 fi
 
-# تثبيت النظام
+# ========== تثبيت النظام الأساسي باستخدام setup-disk ==========
 info "Running setup-disk..."
 setup-disk -m sys /mnt || error "setup-disk failed"
 
+# نسخ ملف الإجابة إلى النظام الجديد
 cp /tmp/answer_file /mnt/tmp/
 
-# تهيئة داخل chroot
+# ========== تهيئة النظام داخل chroot ==========
 info "Configuring system inside chroot..."
 mount --bind /dev /mnt/dev
 mount --bind /proc /mnt/proc
 mount --bind /sys /mnt/sys
 
 chroot /mnt /bin/sh <<EOF
+    # تعيين كلمة مرور الجذر
     echo "root:$ROOT_PASSWORD" | chpasswd
+
+    # إنشاء المستخدم العادي إذا طلب
     if [ "$create_user" = "y" ]; then
         adduser -D -h /home/$USER_NAME -s /bin/ash $USER_NAME
         echo "$USER_NAME:$USER_PASSWORD" | chpasswd
@@ -170,18 +222,25 @@ chroot /mnt /bin/sh <<EOF
             done
         fi
     fi
+
+    # تمكين SSH
     if [ "$SSHD_ENABLE" = "openssh" ]; then
         rc-update add sshd default
     fi
+
+    # تمكين خدمة الوقت
     if [ "$NTP_SERVICE" = "openntpd" ]; then
         rc-update add openntpd default
     elif [ "$NTP_SERVICE" = "chrony" ]; then
         rc-update add chronyd default
     fi
+
+    # إضافة قسم swap إلى fstab إذا كان موجوداً
     if [ -n "$SWAP_PART" ]; then
         echo "$SWAP_PART swap swap defaults 0 0" >> /etc/fstab
     fi
-    # تركيب قسم EFI وإضافته إلى fstab إذا كان موجوداً
+
+    # إضافة قسم EFI إلى fstab وتركيبه
     if [ "$BOOT_MODE" = "uefi" ] && [ -n "$EFI_PART" ]; then
         mkdir -p /boot
         mount $EFI_PART /boot
@@ -189,11 +248,14 @@ chroot /mnt /bin/sh <<EOF
     fi
 EOF
 
+# ========== تنظيف وإلغاء التركيب ==========
 umount /mnt/dev /mnt/proc /mnt/sys
 umount /mnt/boot 2>/dev/null
 umount /mnt
 
+# ========== اكتمال التثبيت ==========
 info "Installation completed successfully."
+info "You may now reboot into your new Alpine system."
 info "Root password: $ROOT_PASSWORD"
 [ -n "$USER_NAME" ] && info "User: $USER_NAME, Password: $USER_PASSWORD"
 read -p "Press Enter to reboot..." dummy
