@@ -2,7 +2,7 @@
 set -e
 
 # =================================================================
-# 1. إعدادات المستخدم (User Config)
+# 1. إعدادات المستخدم
 # =================================================================
 DISK="/dev/sda"
 PART_BOOT="/dev/sda1"
@@ -11,11 +11,11 @@ PART_SWAP="/dev/sda2"
 
 HOSTNAME="alpine-pro"
 TIMEZONE="Asia/Riyadh"
-KEYMAP="us us"  # لغة لوحة المفاتيح
+KEYMAP="us us"
 
-echo "--- Full Alpine Installation Starting ---"
+echo "--- Advanced Alpine Installation with BIOS-GPT Auto-Fix ---"
 
-# --- طلب كلمة المرور من المستخدم ---
+# طلب الباسورد مرة واحدة
 printf "Enter Root Password: "
 stty -echo
 read ROOT_PASS
@@ -23,59 +23,64 @@ stty echo
 printf "\n"
 
 # =================================================================
-# 2. اكتشاف النظام (Auto-Discovery)
+# 2. اكتشاف النظام ومعالجة حالة BIOS + GPT
 # =================================================================
-if [ -d "/sys/firmware/efi" ]; then
-    BOOT_MODE="UEFI"
-    FS_TYPE="vfat"
-else
-    BOOT_MODE="BIOS"
-    FS_TYPE="ext4"
+apk add parted --no-cache > /dev/null
+
+[ -d "/sys/firmware/efi" ] && BOOT_MODE="UEFI" || BOOT_MODE="BIOS"
+PART_TYPE=$(parted -s "$DISK" print | grep "Partition Table" | cut -d: -f2 | xargs)
+
+echo "✅ Mode: $BOOT_MODE | Disk: $PART_TYPE"
+
+if [ "$BOOT_MODE" = "BIOS" ] && [ "$PART_TYPE" = "gpt" ]; then
+    echo "🛠️ Checking for BIOS Boot Partition..."
+    if ! parted -s "$DISK" print | grep -q "bios_grub"; then
+        echo "⚠️ BIOS Boot Partition not found! Attempting to create one..."
+        # محاولة إنشاء قسم 1MB في أول مساحة فارغة (عادة بين 34 و 2047 قطاع)
+        parted -s "$DISK" mkpart primary 1MiB 2MiB
+        # تحديد رقم القسم الجديد (غالباً سيكون الأخير) وضبط العلم عليه
+        NEW_PART=$(parted -s "$DISK" print | grep "1049kB" | awk '{print $1}')
+        parted -s "$DISK" set "$NEW_PART" bios_grub on
+        echo "✅ BIOS Boot Partition created successfully on part $NEW_PART"
+    else
+        echo "✅ BIOS Boot Partition already exists."
+    fi
 fi
-echo "✅ Mode: $BOOT_MODE"
 
 # =================================================================
-# 3. إعداد ملف الإجابات (Answers File)
+# 3. إعداد ملف الإجابات (تجاوز كل الأسئلة)
 # =================================================================
-# هذا الجزء يعوض عن تشغيل setup-alpine يدوياً
 cat << EOF > /tmp/answers
 KEYMAPOPTS="$KEYMAP"
 HOSTNAMEOPTS="-n $HOSTNAME"
 INTERFACESOPTS="auto lo\niface lo inet loopback\nauto eth0\niface eth0 inet dhcp\n"
 TIMEZONEOPTS="-z $TIMEZONE"
-APKREPOSOPTS="-1"   # اختيار أسرع مستودع تلقائياً
-SSHDOPTS="-c openssh"
-NTPOPTS="-c chrony"
+APKREPOSOPTS="-1"
+PASSWORDOPTS="none"
+DISKOPTS="none"
 EOF
 
-echo "🛠️ Applying System Settings (Language, Repos, Network)..."
+echo "⚙️ Setting up system environment..."
 setup-alpine -f /tmp/answers
 
 # =================================================================
-# 4. تهيئة وتركيب الأقسام
+# 4. التثبيت والإقلاع
 # =================================================================
-echo "🛠️ Formatting and Mounting..."
 apk add e2fsprogs dosfstools --no-cache
 
+echo "🛠️ Formatting and Mounting..."
 mkfs.ext4 -F "$PART_ROOT"
-if [ "$BOOT_MODE" = "UEFI" ]; then
-    mkfs.vfat -F32 "$PART_BOOT"
-else
-    mkfs.ext4 -F "$PART_BOOT"
-fi
+[ "$BOOT_MODE" = "UEFI" ] && mkfs.vfat -F32 "$PART_BOOT" || mkfs.ext4 -F "$PART_BOOT"
 
 mount "$PART_ROOT" /mnt
 mkdir -p /mnt/boot
 mount "$PART_BOOT" /mnt/boot
 [ -n "$PART_SWAP" ] && mkswap "$PART_SWAP" && swapon "$PART_SWAP"
 
-# =================================================================
-# 5. التثبيت النهائي (System & Bootloader)
-# =================================================================
 export BOOTLOADER=none
 setup-disk -m sys /mnt
 
-echo "🔗 Binding directories and installing Bootloader..."
+echo "🔗 Binding directories and fixing GRUB..."
 for dir in /dev /proc /sys /run; do
     mkdir -p /mnt$dir
     mount --bind $dir /mnt$dir
@@ -83,10 +88,7 @@ done
 
 cat << CHROOT_SCRIPT > /mnt/final_setup.sh
 #!/bin/sh
-# ضبط كلمة المرور داخل النظام
 echo "root:$ROOT_PASS" | chpasswd
-
-# تثبيت محمل الإقلاع
 if [ "$BOOT_MODE" = "UEFI" ]; then
     apk add grub-efi efibootmgr --no-cache
     grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ALPINE
@@ -101,4 +103,6 @@ chmod +x /mnt/final_setup.sh
 chroot /mnt /bin/sh /final_setup.sh
 rm /mnt/final_setup.sh
 
-echo "✅ DONE! You can now reboot."
+echo "====================================================="
+echo "✅ DONE! GPT-BIOS blocklist error avoided."
+echo "====================================================="
