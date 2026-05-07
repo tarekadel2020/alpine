@@ -66,6 +66,15 @@ else
     BOOT_MODE="bios"
 fi
 
+# ========== تثبيت الأدوات المطلوبة للتقسيم ==========
+info "Checking and installing required tools (e2fsprogs, dosfstools, cfdisk, parted)..."
+apk update
+apk add e2fsprogs dosfstools cfdisk parted
+if [ $? -ne 0 ]; then
+    error "Failed to install required tools. Please check your internet connection."
+fi
+info "Required tools installed successfully."
+
 # ========== تقسيم القرص ==========
 info "Now we will partition $DISK."
 ask "Do you want automatic partitioning (single root + swap) or manual using cfdisk? [auto/manual]"
@@ -228,4 +237,3 @@ info "You may now reboot into your new Alpine system."
 info "Root password: $ROOT_PASSWORD"
 [ -n "$USER_NAME" ] && info "User: $USER_NAME, Password: $USER_PASSWORD"
 read -p "Press Enter to reboot..." dummy
-reboot
