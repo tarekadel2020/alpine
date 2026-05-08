@@ -1,0 +1,128 @@
+# لتشغيل النت 
+
+setup-interfaces
+rc-service networking start
+
+#################################
+# لتحديث المستودعات
+
+setup-apkrepos -1
+
+#################################
+# البرامج الازمة
+
+apk update
+apk add util-linux e2fsprogs dosfstools
+
+########################################
+# التحقق من نوع جهازك BIOS & UEFI
+
+ls /sys/firmware/efi
+
+### اذا اعطت ملفات هذا يعني ان جهازك من نوع UEFI
+### اما اذا اعطت  "No such file or directory"  فان جهازك علي نظام BIOS
+
+########################################
+# التحقق من نوع الهارد MBR & GPT
+
+fdisk -l | grep "Disklabel type"
+
+### اذا اعطت dos هذا يعني ان هاردك MBR
+### اذا اعطت gpt هذا يعني ان هاردك GPT
+
+########################################
+# تقسيم الهارد ديسك
+
+cfdisk /dev/sda
+  |__  اذا كان جهاز يدعم Bios اختار dos  
+       |==>   اذا كان جهازك يدعم Bios يجب عمل برتشان للبوت 512 ميجا ويكون من نوع mkfs.ext4
+  
+  |__  اذا كان جهاز يدعم UEFI اختار gpt
+       |==>   اذا كان جهازك يدعم UEFI يجب عمل برتشان للبوت 512 ميجا ويكون من نوع mkfs.vfat
+
+### /dev/sda1   ===> Boot
+### /dev/sda2   ===> Swap
+### /dev/sda3   ===> Root
+
+#########################  Bios  ###########################
+mkfs.ext4 /dev/sda1
+mkfs.ext4 /dev/sda3
+mkswap /dev/sda2
+swapon /dev/sda2
+
+mount /dev/sda3 /mnt
+mkdir -p /mnt/boot
+mount /dev/sda1 /mnt/boot
+
+####   نستخدم هذا الامر اذا ظهر هذا الخطاء " mount : mounting /dev/sda1 on /mnt/boot faild"
+####  mount -t ext4 /dev/sda1 /mnt/boot
+
+setup-disk -m sys /mnt
+
+####   نستخدم هذا الامر اذا ظهر هذا الخطاء  " you might need fix the MBR to be able to boot "
+####  for dir in /dev /proc /sys /run; do mount --bind $dir /mnt$dir; done 
+####  chroot /mnt /bin/sh
+####  apk update
+####  apk add grub-bios
+####  grub-install --target=i386-pc /dev/sda
+####  grub-mkconfig -o /boot/grub/grub.cfg
+####  Exit
+
+#########################  UEFI  ###########################
+mkfs.vfat -F32 /dev/sda1
+mkfs.ext4 /dev/sda3
+mkswap /dev/sda2
+swapon /dev/sda2
+
+mount /dev/sda3 /mnt
+mkdir -p /mnt/boot/efi
+mount /dev/sda1 /mnt/boot/efi
+
+
+####   نستخدم هذا الامر اذا ظهر هذا الخطاء " mount : mounting /dev/sda1 on /mnt/boot faild"
+####  mount -t vfat /dev/sda1 /mnt/boot/efi
+
+setup-disk -m sys /mnt
+
+####   نستخدم هذا الامر اذا ظهر هذا الخطاء  " you might need fix the MBR to be able to boot "
+####   for dir in /dev /proc /sys /run; do mount --bind $dir /mnt$dir; done
+####  chroot /mnt /bin/sh
+####  apk update
+####  apk add grub-efi efibootmgr
+####  grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=Alpine
+####  grub-mkconfig -o /boot/grub/grub.cfg
+####  Exit
+
+#########################  التحقق من ملف fstab  ###########################
+
+#### cat /mnt/etc/fstab     # اذا كان الملف مكتوب بشكل صحيخ يمكنك عمل reboot
+
+reboot
+
+#########################   Install Gui  ###########################
+setup-xorg-base
+setup-desktop
+setup-user ####  تستخدم هذا الامر في حالة انك لم تقوم بنشاء مستخدم غير root
+addgroup  <user> wheel
+addgroup  <user> audio
+addgroup  <user> video
+
+reboot
+
+#########################
+# تعريف الصوت
+
+apk add alsa-utils alsa-lib alsa-plugins alsa-plugins-pulse
+rc-service alsa start
+rc-update add alsa
+alsamixer
+
+
+# هذا افضل
+apk add pipewire wireplumber pipewire-pulse pipewire-alsa dbus
+rc-service dbus start
+rc-update add dbus
+rc-service -U pipewire start
+rc-service -U wireplumber start
+rc-update -U add pipewire default
+rc-update -U add wireplumber default
